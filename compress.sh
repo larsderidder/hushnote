@@ -81,9 +81,10 @@ if [ ! -f "$WAV_FILE" ]; then
     exit 1
 fi
 
-# Check if file is actually a WAV
+# Only WAV inputs are supported here.
 if [[ ! "$WAV_FILE" =~ \.wav$ ]]; then
-    echo "Warning: File doesn't have .wav extension: $WAV_FILE" >&2
+    echo "Error: Refusing to compress non-WAV file: $WAV_FILE" >&2
+    exit 1
 fi
 
 # Determine output file

@@ -8,13 +8,16 @@ Transcribes audio files to text with timestamps
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 # libcublas is bundled with Ollama on some systems and not on the system path
 _CUDA_LIBS = os.environ.get("CUDA_LIBS", "")
 if _CUDA_LIBS and _CUDA_LIBS not in os.environ.get("LD_LIBRARY_PATH", ""):
-    os.environ["LD_LIBRARY_PATH"] = _CUDA_LIBS + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+    os.environ["LD_LIBRARY_PATH"] = (
+        _CUDA_LIBS + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+    )
 
 try:
     from faster_whisper import WhisperModel
@@ -27,6 +30,7 @@ except ImportError:
 def _unload_ollama():
     """Unload Ollama models to free VRAM. Only called when UNLOAD_OLLAMA=1."""
     import urllib.request
+
     url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
     try:
         req = urllib.request.Request(f"{url}/api/ps")
@@ -47,12 +51,18 @@ def _unload_ollama():
         pass
 
 
+def _is_cuda_runtime_error(error: RuntimeError) -> bool:
+    """Return whether an error should trigger CPU fallback."""
+    message = str(error).lower()
+    return "out of memory" in message or "cuda" in message or "cublas" in message
+
+
 def transcribe_audio(
     audio_file: str,
     model_size: str = "base",
     device: str = "auto",
     language: str = None,
-    output_format: str = "txt"
+    output_format: str = "txt",
 ) -> dict:
     """
     Transcribe an audio file using faster-whisper
@@ -79,7 +89,9 @@ def transcribe_audio(
     compute_type = "int8_float16" if device == "cuda" else "int8"
 
     def _load_model(dev, ctype):
-        print(f"Loading Whisper model: {model_size} on {dev} ({ctype})", file=sys.stderr)
+        print(
+            f"Loading Whisper model: {model_size} on {dev} ({ctype})", file=sys.stderr
+        )
         return WhisperModel(model_size, device=dev, compute_type=ctype)
 
     def _run_transcription(mdl):
@@ -90,18 +102,23 @@ def transcribe_audio(
         print(f"Detected language: {info.language}", file=sys.stderr)
         result_segments = []
         for segment in segments:
-            result_segments.append({
-                "start": segment.start,
-                "end": segment.end,
-                "text": segment.text.strip()
-            })
+            result_segments.append(
+                {
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": segment.text.strip(),
+                }
+            )
         return info, result_segments
 
     try:
         model = _load_model(device, compute_type)
     except RuntimeError as e:
-        if "out of memory" in str(e).lower() or "CUDA" in str(e):
-            print("GPU OOM during model load, falling back to CPU", file=sys.stderr)
+        if _is_cuda_runtime_error(e):
+            print(
+                "CUDA unavailable during model load, falling back to CPU",
+                file=sys.stderr,
+            )
             device = "cpu"
             model = _load_model("cpu", "int8")
         else:
@@ -111,8 +128,11 @@ def transcribe_audio(
     try:
         info, all_segments = _run_transcription(model)
     except RuntimeError as e:
-        if "out of memory" in str(e).lower() or "CUDA" in str(e):
-            print("GPU OOM during transcription, falling back to CPU", file=sys.stderr)
+        if _is_cuda_runtime_error(e):
+            print(
+                "CUDA unavailable during transcription, falling back to CPU",
+                file=sys.stderr,
+            )
             del model
             model = _load_model("cpu", "int8")
             info, all_segments = _run_transcription(model)
@@ -122,8 +142,39 @@ def transcribe_audio(
     return {
         "language": info.language,
         "segments": all_segments,
-        "text": " ".join(s["text"] for s in all_segments)
+        "text": " ".join(s["text"] for s in all_segments),
     }
+
+
+def format_plain_text(segments: list[dict]) -> str:
+    """Format transcript segments as readable paragraphs."""
+    paragraphs = []
+    current = []
+    current_length = 0
+    previous_end = None
+
+    for segment in segments:
+        text = re.sub(r"\s+", " ", segment["text"].strip())
+        if not text:
+            continue
+
+        pause = segment["start"] - previous_end if previous_end is not None else 0
+        starts_new_paragraph = bool(current) and (
+            pause >= 1.2 or current_length + len(text) > 700
+        )
+        if starts_new_paragraph:
+            paragraphs.append(" ".join(current))
+            current = []
+            current_length = 0
+
+        current.append(text)
+        current_length += len(text) + 1
+        previous_end = segment["end"]
+
+    if current:
+        paragraphs.append(" ".join(current))
+
+    return "\n\n".join(paragraphs)
 
 
 def format_timestamp(seconds: float) -> str:
@@ -140,7 +191,7 @@ def save_transcription(result: dict, output_file: str, format: str):
     output_path = Path(output_file)
 
     if format == "txt":
-        output_path.write_text(result["text"])
+        output_path.write_text(format_plain_text(result["segments"]) + "\n")
 
     elif format == "json":
         output_path.write_text(json.dumps(result, indent=2))
@@ -149,7 +200,9 @@ def save_transcription(result: dict, output_file: str, format: str):
         lines = []
         for i, seg in enumerate(result["segments"], 1):
             lines.append(str(i))
-            lines.append(f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}")
+            lines.append(
+                f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}"
+            )
             lines.append(seg["text"])
             lines.append("")
         output_path.write_text("\n".join(lines))
@@ -157,7 +210,9 @@ def save_transcription(result: dict, output_file: str, format: str):
     elif format == "vtt":
         lines = ["WEBVTT", ""]
         for seg in result["segments"]:
-            lines.append(f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}")
+            lines.append(
+                f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}"
+            )
             lines.append(seg["text"])
             lines.append("")
         output_path.write_text("\n".join(lines))
@@ -166,21 +221,35 @@ def save_transcription(result: dict, output_file: str, format: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Transcribe audio using faster-whisper")
+    parser = argparse.ArgumentParser(
+        description="Transcribe audio using faster-whisper"
+    )
     parser.add_argument("audio_file", help="Path to audio file")
-    parser.add_argument("-m", "--model", default="base",
-                       choices=["tiny", "base", "small", "medium", "large-v3"],
-                       help="Whisper model size (default: base)")
-    parser.add_argument("-d", "--device", default="auto",
-                       choices=["cpu", "cuda", "auto"],
-                       help="Device to use (default: auto)")
-    parser.add_argument("-l", "--language", default=None,
-                       help="Language code (default: auto-detect)")
-    parser.add_argument("-f", "--format", default="txt",
-                       choices=["txt", "json", "srt", "vtt"],
-                       help="Output format (default: txt)")
-    parser.add_argument("-o", "--output",
-                       help="Output file (default: audio_file.txt)")
+    parser.add_argument(
+        "-m",
+        "--model",
+        default="base",
+        choices=["tiny", "base", "small", "medium", "large-v3"],
+        help="Whisper model size (default: base)",
+    )
+    parser.add_argument(
+        "-d",
+        "--device",
+        default="auto",
+        choices=["cpu", "cuda", "auto"],
+        help="Device to use (default: auto)",
+    )
+    parser.add_argument(
+        "-l", "--language", default=None, help="Language code (default: auto-detect)"
+    )
+    parser.add_argument(
+        "-f",
+        "--format",
+        default="txt",
+        choices=["txt", "json", "srt", "vtt"],
+        help="Output format (default: txt)",
+    )
+    parser.add_argument("-o", "--output", help="Output file (default: audio_file.txt)")
 
     args = parser.parse_args()
 
@@ -203,19 +272,20 @@ def main():
             model_size=args.model,
             device=args.device,
             language=args.language,
-            output_format=args.format
+            output_format=args.format,
         )
 
         # Save results
         save_transcription(result, output_file, args.format)
 
         # Print summary
-        print(f"\nTranscription complete!", file=sys.stderr)
+        print("\nTranscription complete!", file=sys.stderr)
         print(f"Segments: {len(result['segments'])}", file=sys.stderr)
 
     except Exception as e:
         print(f"Error during transcription: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

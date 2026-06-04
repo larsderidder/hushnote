@@ -58,8 +58,9 @@ def apply_labels_to_transcript(data: dict, format: str = "txt") -> str:
     labels = data.get("labels", {})
 
     if format == "txt" or format == "md":
-        lines = []
+        blocks = []
         current_speaker = None
+        current_text = []
 
         for seg in segments:
             speaker_id = seg["speaker_id"]
@@ -69,18 +70,21 @@ def apply_labels_to_transcript(data: dict, format: str = "txt") -> str:
             if not text:
                 continue
 
-            # Group consecutive segments from same speaker
+            # Group consecutive segments from same speaker.
             if speaker_name != current_speaker:
-                if format == "md":
-                    lines.append(f"\n**{speaker_name}**: {text}")
-                else:
-                    lines.append(f"\n[{speaker_name}] {text}")
+                if current_text:
+                    blocks.append(
+                        _format_speaker_block(current_speaker, current_text, format)
+                    )
                 current_speaker = speaker_name
+                current_text = [text]
             else:
-                # Continue previous speaker
-                lines.append(text)
+                current_text.append(text)
 
-        return " ".join(lines).strip()
+        if current_text:
+            blocks.append(_format_speaker_block(current_speaker, current_text, format))
+
+        return "\n\n".join(blocks).strip()
 
     elif format == "json":
         # JSON output with speaker names
@@ -89,22 +93,27 @@ def apply_labels_to_transcript(data: dict, format: str = "txt") -> str:
             speaker_id = seg["speaker_id"]
             speaker_name = get_speaker_name(speaker_id, labels)
 
-            output_segments.append({
-                "speaker": speaker_name,
-                "speaker_id": speaker_id,
-                "start": seg["start"],
-                "end": seg["end"],
-                "text": seg["text"]
-            })
+            output_segments.append(
+                {
+                    "speaker": speaker_name,
+                    "speaker_id": speaker_id,
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": seg["text"],
+                }
+            )
 
-        return json.dumps({
-            "audio_file": data.get("audio_file"),
-            "duration": data.get("duration"),
-            "language": data.get("language"),
-            "num_speakers": data.get("num_speakers"),
-            "segments": output_segments,
-            "labels": labels
-        }, indent=2)
+        return json.dumps(
+            {
+                "audio_file": data.get("audio_file"),
+                "duration": data.get("duration"),
+                "language": data.get("language"),
+                "num_speakers": data.get("num_speakers"),
+                "segments": output_segments,
+                "labels": labels,
+            },
+            indent=2,
+        )
 
     elif format == "srt":
         # SRT subtitle format with speaker names
@@ -154,6 +163,14 @@ def apply_labels_to_transcript(data: dict, format: str = "txt") -> str:
         raise ValueError(f"Unsupported format: {format}")
 
 
+def _format_speaker_block(speaker_name: str, texts: list[str], format: str) -> str:
+    """Format one speaker turn as a readable block."""
+    text = " ".join(texts)
+    if format == "md":
+        return f"**{speaker_name}**: {text}"
+    return f"[{speaker_name}] {text}"
+
+
 def format_srt_timestamp(seconds: float) -> str:
     """Format seconds to SRT timestamp (HH:MM:SS,mmm)"""
     hours = int(seconds // 3600)
@@ -183,13 +200,17 @@ def main():
     parser = argparse.ArgumentParser(
         description="Apply speaker labels to create final transcript"
     )
-    parser.add_argument("labeled_file",
-                       help="Path to labeled JSON file (_speakers_labeled.json)")
-    parser.add_argument("-f", "--format", default="txt",
-                       choices=["txt", "md", "json", "srt", "vtt"],
-                       help="Output format (default: txt)")
-    parser.add_argument("-o", "--output",
-                       help="Output file (default: audio_file.txt)")
+    parser.add_argument(
+        "labeled_file", help="Path to labeled JSON file (_speakers_labeled.json)"
+    )
+    parser.add_argument(
+        "-f",
+        "--format",
+        default="txt",
+        choices=["txt", "md", "json", "srt", "vtt"],
+        help="Output format (default: txt)",
+    )
+    parser.add_argument("-o", "--output", help="Output file (default: audio_file.txt)")
 
     args = parser.parse_args()
 
@@ -208,22 +229,23 @@ def main():
 
     # Apply labels and format
     try:
-        print(f"Applying labels to transcript...", file=sys.stderr)
+        print("Applying labels to transcript...", file=sys.stderr)
         transcript = apply_labels_to_transcript(data, format=args.format)
 
         # Save result
         save_transcript(transcript, output_file)
 
-        print(f"\nTranscript complete!", file=sys.stderr)
+        print("\nTranscript complete!", file=sys.stderr)
 
         # Show next step
         if args.format in ["txt", "md"]:
-            print(f"\nNext step:", file=sys.stderr)
+            print("\nNext step:", file=sys.stderr)
             print(f"  ./hushnote summarize {output_file}", file=sys.stderr)
 
     except Exception as e:
         print(f"Error applying labels: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)
 

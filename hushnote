@@ -25,6 +25,8 @@ PROCESS_TIMEOUT="${PROCESS_TIMEOUT:-7200}"  # Max seconds for process/process-la
 TRIM_NOISE_DB="${TRIM_NOISE_DB:--35}"       # dB threshold for silence detection (default: -35)
 TRIM_MIN_SILENCE="${TRIM_MIN_SILENCE:-60}"  # Minimum silence duration in seconds (default: 60)
 POST_SUMMARY_HOOK="${POST_SUMMARY_HOOK:-}"  # Script to run after summary is created; receives summary path as $1
+HUSHNOTE_DIARIZE="${HUSHNOTE_DIARIZE:-auto}"  # auto enables diarization when HF_TOKEN is present
+HUSHNOTE_LABEL_SPEAKERS="${HUSHNOTE_LABEL_SPEAKERS:-auto}"  # auto labels only in an interactive terminal
 DEBUG="${DEBUG:-false}"
 PYTHON="${SCRIPT_DIR}/venv/bin/python3"
 
@@ -65,6 +67,7 @@ Options:
     -s, --speakers NUM  Number of speakers (for diarization)
     -t, --title TITLE   Meeting title (prompted if not provided)
     --diarize           Enable speaker diarization in full workflow
+    --no-diarize        Disable speaker diarization even when HUSHNOTE_DIARIZE=auto/true
     --no-compress       Skip MP3 compression (keep WAV only)
     --keep-wav          Keep WAV file after compression (default: delete WAV)
     --no-trim           Skip silent tail trimming
@@ -79,6 +82,8 @@ Environment Variables:
     OLLAMA_MODEL        Default Ollama model (default: llama3.1:8b)
     OLLAMA_URL          Ollama API URL (default: http://localhost:11434)
     HF_TOKEN            HuggingFace API token (for speaker diarization)
+    HUSHNOTE_DIARIZE    auto|true|false (default: auto, enables when HF_TOKEN is set)
+    HUSHNOTE_LABEL_SPEAKERS auto|true|false (default: auto, labels only in a terminal)
     PROCESS_TIMEOUT     Max seconds for process/process-last before auto-kill (default: 7200)
     TRIM_NOISE_DB       Silence threshold in dB for tail trimming (default: -35)
     TRIM_MIN_SILENCE    Minimum silence duration in seconds to consider a tail (default: 60)
@@ -119,6 +124,36 @@ log_success() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+
+diarization_enabled_by_default() {
+    case "${HUSHNOTE_DIARIZE,,}" in
+        true|yes|1)
+            return 0
+            ;;
+        auto)
+            [ -n "${HF_TOKEN:-}" ]
+            return
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+speaker_labeling_enabled() {
+    case "${HUSHNOTE_LABEL_SPEAKERS,,}" in
+        true|yes|1)
+            return 0
+            ;;
+        auto)
+            [ -t 0 ]
+            return
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 log_warn() {
@@ -338,6 +373,7 @@ full_workflow() {
     local ollama_model="$OLLAMA_MODEL"
     local format=""
     local enable_diarization=false
+    diarization_enabled_by_default && enable_diarization=true
     local num_speakers=""
     local enable_compression=true
     local keep_wav=false
@@ -375,6 +411,10 @@ full_workflow() {
                 ;;
             --diarize)
                 enable_diarization=true
+                shift
+                ;;
+            --no-diarize)
+                enable_diarization=false
                 shift
                 ;;
             -s|--speakers)
@@ -515,27 +555,30 @@ full_workflow() {
 
         echo ""
 
-        # Step 5: Label speakers interactively
+        # Step 5: Label speakers interactively when a terminal is available.
         log_info "Step 5: Label speakers with their names..."
         echo ""
 
-        # Call label_speakers without command substitution to allow interactive input
-        label_speakers "$diarized_file"
-
-        # Determine output file manually
         local base="${diarized_file%_diarized.json}"
         local labeled_file="${base}_speakers_labeled.json"
+        if speaker_labeling_enabled; then
+            # Call label_speakers without command substitution to allow interactive input.
+            label_speakers "$diarized_file"
 
-        if [ ! -f "$labeled_file" ]; then
-            log_error "Labeling failed"
-            exit 1
+            if [ ! -f "$labeled_file" ]; then
+                log_error "Labeling failed"
+                exit 1
+            fi
+        else
+            log_info "Skipping interactive speaker labeling; using speaker IDs"
+            labeled_file="$diarized_file"
         fi
 
         echo ""
 
         # Step 6: Apply labels to create final transcript
         log_info "Step 6: Creating final transcript with speaker names..."
-        local transcription_file=$(apply_speaker_labels "$labeled_file" -f txt)
+        local transcription_file=$(apply_speaker_labels "$labeled_file" -f txt -o "${base}.txt")
 
         if [ -z "$transcription_file" ] || [ ! -f "$transcription_file" ]; then
             log_error "Apply labels failed"
@@ -830,6 +873,11 @@ compress_audio() {
     if [ ! -f "$audio_file" ]; then
         log_error "Audio file not found: $audio_file"
         exit 1
+    fi
+
+    if [[ ! "$audio_file" =~ \.wav$ ]]; then
+        log_info "Skipping compression for non-WAV audio: $audio_file"
+        return 0
     fi
 
     log_info "Compressing audio: $audio_file"
@@ -1580,6 +1628,7 @@ main() {
                 echo "  -o, --ollama MODEL    Ollama model for summarization"
                 echo "  -s, --speakers NUM    Number of speakers (requires --diarize)"
                 echo "  --diarize             Enable speaker diarization"
+                echo "  --no-diarize          Disable speaker diarization even when enabled by config"
                 echo "  --timeout SECS        Kill processing after SECS seconds (default: ${PROCESS_TIMEOUT})"
                 echo ""
                 echo "Examples:"
@@ -1604,6 +1653,7 @@ main() {
             local whisper_language="$WHISPER_LANGUAGE"
             local ollama_model="$OLLAMA_MODEL"
             local enable_diarization=false
+            diarization_enabled_by_default && enable_diarization=true
             local num_speakers=""
             local enable_compression=true
             local keep_wav=false
@@ -1629,6 +1679,10 @@ main() {
                         ;;
                     --diarize)
                         enable_diarization=true
+                        shift
+                        ;;
+                    --no-diarize)
+                        enable_diarization=false
                         shift
                         ;;
                     -s|--speakers)
@@ -1727,26 +1781,29 @@ main() {
                 fi
                 echo ""
 
-                # Step 4: Label speakers
+                # Step 4: Label speakers interactively when a terminal is available.
                 log_info "Step 4: Label speakers with their names..."
                 echo ""
 
-                # Call label_speakers without command substitution to allow interactive input
-                label_speakers "$diarized_file"
-
-                # Determine output file manually
                 local base="${diarized_file%_diarized.json}"
                 local labeled_file="${base}_speakers_labeled.json"
+                if speaker_labeling_enabled; then
+                    # Call label_speakers without command substitution to allow interactive input.
+                    label_speakers "$diarized_file"
 
-                if [ ! -f "$labeled_file" ]; then
-                    log_error "Labeling failed"
-                    exit 1
+                    if [ ! -f "$labeled_file" ]; then
+                        log_error "Labeling failed"
+                        exit 1
+                    fi
+                else
+                    log_info "Skipping interactive speaker labeling; using speaker IDs"
+                    labeled_file="$diarized_file"
                 fi
                 echo ""
 
                 # Step 5: Apply labels
                 log_info "Step 5: Creating final transcript with speaker names..."
-                local transcription_file=$(apply_speaker_labels "$labeled_file" -f txt)
+                local transcription_file=$(apply_speaker_labels "$labeled_file" -f txt -o "${base}.txt")
 
                 if [ -z "$transcription_file" ] || [ ! -f "$transcription_file" ]; then
                     log_error "Apply labels failed"

@@ -58,6 +58,16 @@
 # Default: 60
 #TRIM_MIN_SILENCE=60
 
+# Live audio watchdog during recording.
+# Warns when the selected audio source stays near-silent while recording.
+# With AUDIO_SOURCE_TYPE=both, microphone and meeting output are checked separately.
+#HUSHNOTE_AUDIO_MONITOR=true
+#HUSHNOTE_AUDIO_MONITOR_GRACE=20
+#HUSHNOTE_AUDIO_MONITOR_INTERVAL=30
+#HUSHNOTE_AUDIO_MONITOR_SAMPLE=3
+#HUSHNOTE_AUDIO_MONITOR_WARN_AFTER=2
+#HUSHNOTE_AUDIO_SILENCE_MAX_DB=-45
+
 # Post-summary hook: path to an executable that runs after every summary is created.
 # Receives the summary file path as $1.
 # On success, hushnote writes a .hook_done marker so the hook is not re-run.
@@ -72,7 +82,14 @@
 # Will be called as: $NOTIFY_CMD "summary" "body"
 #NOTIFY_CMD=notify-send
 
-# HuggingFace API token — required for speaker diarization (pyannote models).
+# Speaker diarization.
+# Default: auto, which runs diarization when HF_TOKEN is set.
+# In unattended runs, speaker names are not prompted and SPEAKER_00-style IDs are used.
+#HUSHNOTE_DIARIZE=auto
+#HUSHNOTE_LABEL_SPEAKERS=auto
+
+# HuggingFace API token, required for speaker diarization with pyannote models.
+# Prefer exporting this from a secret manager or shell profile instead of committing it here.
 # Create a token at https://huggingface.co/settings/tokens
 # Accept model conditions at https://huggingface.co/pyannote/speaker-diarization-3.1
-#HF_TOKEN=hf_...
+#HF_TOKEN=${HF_TOKEN:-}
