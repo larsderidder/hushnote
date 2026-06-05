@@ -66,7 +66,7 @@
 #HUSHNOTE_AUDIO_MONITOR_INTERVAL=30
 #HUSHNOTE_AUDIO_MONITOR_SAMPLE=3
 #HUSHNOTE_AUDIO_MONITOR_WARN_AFTER=2
-#HUSHNOTE_AUDIO_SILENCE_MAX_DB=-45
+#HUSHNOTE_AUDIO_SILENCE_MAX_DB=-60
 
 # Post-summary hook: path to an executable that runs after every summary is created.
 # Receives the summary file path as $1.

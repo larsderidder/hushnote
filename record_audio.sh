@@ -29,7 +29,7 @@ HUSHNOTE_AUDIO_MONITOR_GRACE="${HUSHNOTE_AUDIO_MONITOR_GRACE:-20}"
 HUSHNOTE_AUDIO_MONITOR_INTERVAL="${HUSHNOTE_AUDIO_MONITOR_INTERVAL:-30}"
 HUSHNOTE_AUDIO_MONITOR_SAMPLE="${HUSHNOTE_AUDIO_MONITOR_SAMPLE:-3}"
 HUSHNOTE_AUDIO_MONITOR_WARN_AFTER="${HUSHNOTE_AUDIO_MONITOR_WARN_AFTER:-2}"
-HUSHNOTE_AUDIO_SILENCE_MAX_DB="${HUSHNOTE_AUDIO_SILENCE_MAX_DB:--45}"
+HUSHNOTE_AUDIO_SILENCE_MAX_DB="${HUSHNOTE_AUDIO_SILENCE_MAX_DB:--60}"
 
 cleanup_audio_modules() {
     local pid module
@@ -279,15 +279,6 @@ set -e
 if [ -f "$OUTPUT_FILE" ]; then
     echo "" >&2
     echo "Recording saved to: $OUTPUT_FILE" >&2
-
-    # Prompt for title if not provided and a terminal is available
-    if [ -z "$TITLE" ]; then
-        if read -p "Meeting title (optional): " TITLE </dev/tty 2>/dev/null; then
-            : # title captured
-        else
-            TITLE=""
-        fi
-    fi
 
     # Create metadata file
     meeting_dir=$(dirname "$OUTPUT_FILE")
