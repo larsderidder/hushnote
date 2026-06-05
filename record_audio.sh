@@ -159,6 +159,44 @@ monitor_audio_source() {
     done
 }
 
+stop_recording_command() {
+    if [ -n "${RECORDING_PID:-}" ]; then
+        kill -INT "$RECORDING_PID" >/dev/null 2>&1 || true
+    fi
+    if [ -n "${RECORDING_TIMER_PID:-}" ]; then
+        kill "$RECORDING_TIMER_PID" >/dev/null 2>&1 || true
+    fi
+}
+
+run_recording_command() {
+    local duration="$1"
+    shift
+    local status
+
+    RECORDING_PID=""
+    RECORDING_TIMER_PID=""
+    trap stop_recording_command INT TERM
+
+    "$@" &
+    RECORDING_PID="$!"
+
+    if [ -n "$duration" ]; then
+        (sleep "$duration"; kill -TERM "$RECORDING_PID" >/dev/null 2>&1 || true) &
+        RECORDING_TIMER_PID="$!"
+    fi
+
+    wait "$RECORDING_PID"
+    status=$?
+
+    if [ -n "$RECORDING_TIMER_PID" ]; then
+        kill "$RECORDING_TIMER_PID" >/dev/null 2>&1 || true
+        wait "$RECORDING_TIMER_PID" >/dev/null 2>&1 || true
+    fi
+
+    trap - INT TERM
+    return "$status"
+}
+
 start_audio_monitor() {
     local label="$1"
     local source="$2"
@@ -235,11 +273,7 @@ if [ "${AUDIO_SOURCE_TYPE:-microphone}" = "both" ]; then
         sleep 0.5
 
         PW_ARGS=(--target "${MIX_SINK}.monitor" --rate 16000 --channels 1 --format s16)
-        if [ -n "$DURATION" ]; then
-            timeout "$DURATION" pw-record "${PW_ARGS[@]}" "$OUTPUT_FILE" >&2
-        else
-            pw-record "${PW_ARGS[@]}" "$OUTPUT_FILE" >&2
-        fi
+        run_recording_command "$DURATION" pw-record "${PW_ARGS[@]}" "$OUTPUT_FILE" >&2
         ffmpeg_exit_code=$?
     else
         FFMPEG_ARGS=(
@@ -258,11 +292,7 @@ if [ "${AUDIO_SOURCE_TYPE:-microphone}" = "both" ]; then
 elif [ "$RECORD_BACKEND" = "pw-record" ]; then
     start_audio_monitor "audio source" "$RECORD_SOURCE"
     PW_ARGS=(--target "$RECORD_SOURCE" --rate 16000 --channels 1 --format s16)
-    if [ -n "$DURATION" ]; then
-        timeout "$DURATION" pw-record "${PW_ARGS[@]}" "$OUTPUT_FILE" >&2
-    else
-        pw-record "${PW_ARGS[@]}" "$OUTPUT_FILE" >&2
-    fi
+    run_recording_command "$DURATION" pw-record "${PW_ARGS[@]}" "$OUTPUT_FILE" >&2
     ffmpeg_exit_code=$?
 
 else
