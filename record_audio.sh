@@ -135,6 +135,7 @@ monitor_audio_source() {
     local label="$1"
     local source="$2"
     local silent_count=0
+    local warned=false
     local level
 
     sleep "$HUSHNOTE_AUDIO_MONITOR_GRACE"
@@ -143,14 +144,15 @@ monitor_audio_source() {
         if is_silent_level "$level"; then
             silent_count=$((silent_count + 1))
         else
-            silent_count=0
+            echo "Audio monitor verified $label (${level} dB max); stopping monitor" >&2
+            return 0
         fi
 
-        if [ "$silent_count" -ge "$HUSHNOTE_AUDIO_MONITOR_WARN_AFTER" ]; then
+        if [ "$silent_count" -ge "$HUSHNOTE_AUDIO_MONITOR_WARN_AFTER" ] && [ "$warned" = false ]; then
             notify_audio_warning \
                 "HushNote audio warning" \
-                "$label appears silent while recording (${level} dB max). Check meeting audio capture."
-            silent_count=0
+                "$label has not produced audio yet (${level} dB max). Check meeting audio capture."
+            warned=true
         fi
 
         sleep "$HUSHNOTE_AUDIO_MONITOR_INTERVAL"
