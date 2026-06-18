@@ -62,6 +62,7 @@
 # Warns once if a selected audio source stays silent at startup.
 # Once sound is detected for a source, that monitor exits and will not warn again.
 # With AUDIO_SOURCE_TYPE=both, microphone and meeting output are checked separately.
+# Each recording writes *_audio_monitor.tsv and *_capture_diagnostics.txt for debugging.
 #HUSHNOTE_AUDIO_MONITOR=true
 #HUSHNOTE_AUDIO_MONITOR_GRACE=20
 #HUSHNOTE_AUDIO_MONITOR_INTERVAL=30

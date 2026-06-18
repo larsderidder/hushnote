@@ -22,6 +22,15 @@ DATE=$(date +%Y%m%d)
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 MEETING_DIR="${OUTPUT_DIR}/${DATE}/meeting_${TIMESTAMP}"
 OUTPUT_FILE="${MEETING_DIR}/meeting_${TIMESTAMP}.wav"
+BASE_NAME=""
+AUDIO_MONITOR_STATUS_FILE=""
+CAPTURE_DIAGNOSTICS_FILE=""
+DEFAULT_SOURCE_AT_START=""
+DEFAULT_SINK_AT_START=""
+MIC_SOURCE=""
+MONITOR_SOURCE=""
+MIX_SINK=""
+MIX_MONITOR_SOURCE=""
 LOADED_AUDIO_MODULES=()
 AUDIO_MONITOR_PIDS=()
 HUSHNOTE_AUDIO_MONITOR="${HUSHNOTE_AUDIO_MONITOR:-true}"
@@ -79,6 +88,94 @@ done
 
 # Create output directory
 mkdir -p "$(dirname "$OUTPUT_FILE")"
+BASE_NAME="$(basename "$OUTPUT_FILE" .wav)"
+AUDIO_MONITOR_STATUS_FILE="$(dirname "$OUTPUT_FILE")/${BASE_NAME}_audio_monitor.tsv"
+CAPTURE_DIAGNOSTICS_FILE="$(dirname "$OUTPUT_FILE")/${BASE_NAME}_capture_diagnostics.txt"
+printf 'timestamp\tlabel\tsource\tstatus\tmax_volume_db\n' > "$AUDIO_MONITOR_STATUS_FILE"
+: > "$CAPTURE_DIAGNOSTICS_FILE"
+
+json_escape() {
+    local value="$1"
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/}
+    printf '%s' "$value"
+}
+
+write_capture_diagnostics() {
+    local stage="${1:-snapshot}"
+    {
+        echo ""
+        echo "## $stage"
+        echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "record_backend=$RECORD_BACKEND"
+        echo "audio_source_type=${AUDIO_SOURCE_TYPE:-microphone}"
+        echo "record_source=$RECORD_SOURCE"
+        echo "mic_source=$MIC_SOURCE"
+        echo "monitor_source=$MONITOR_SOURCE"
+        echo "mix_sink=$MIX_SINK"
+        echo "mix_monitor_source=$MIX_MONITOR_SOURCE"
+        echo "default_source_at_start=$DEFAULT_SOURCE_AT_START"
+        echo "default_sink_at_start=$DEFAULT_SINK_AT_START"
+        echo "output_file=$OUTPUT_FILE"
+        echo ""
+        echo "# pactl sources short"
+        pactl list sources short 2>/dev/null || true
+        echo ""
+        echo "# pactl sinks short"
+        pactl list sinks short 2>/dev/null || true
+        echo ""
+        echo "# pactl sink inputs short"
+        pactl list sink-inputs short 2>/dev/null || true
+    } >> "$CAPTURE_DIAGNOSTICS_FILE"
+}
+
+write_metadata() {
+    local metadata_file="$1"
+    local audio_file_name="$2"
+    local title_json record_source_json mic_source_json monitor_source_json mix_sink_json mix_monitor_json
+    local default_source_json default_sink_json monitor_status_json diagnostics_json backend_json source_type_json
+
+    title_json=$(json_escape "$TITLE")
+    backend_json=$(json_escape "$RECORD_BACKEND")
+    source_type_json=$(json_escape "${AUDIO_SOURCE_TYPE:-microphone}")
+    record_source_json=$(json_escape "$RECORD_SOURCE")
+    mic_source_json=$(json_escape "$MIC_SOURCE")
+    monitor_source_json=$(json_escape "$MONITOR_SOURCE")
+    mix_sink_json=$(json_escape "$MIX_SINK")
+    mix_monitor_json=$(json_escape "$MIX_MONITOR_SOURCE")
+    default_source_json=$(json_escape "$DEFAULT_SOURCE_AT_START")
+    default_sink_json=$(json_escape "$DEFAULT_SINK_AT_START")
+    monitor_status_json=$(json_escape "$AUDIO_MONITOR_STATUS_FILE")
+    diagnostics_json=$(json_escape "$CAPTURE_DIAGNOSTICS_FILE")
+
+    cat > "$metadata_file" << EOF
+{
+  "title": "$title_json",
+  "timestamp": "$TIMESTAMP",
+  "date": "$DATE",
+  "audio_file": "$audio_file_name",
+  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "source": "local_recording",
+  "capture": {
+    "record_backend": "$backend_json",
+    "audio_source_type": "$source_type_json",
+    "record_source": "$record_source_json",
+    "mic_source": "$mic_source_json",
+    "monitor_source": "$monitor_source_json",
+    "mix_sink": "$mix_sink_json",
+    "mix_monitor_source": "$mix_monitor_json",
+    "default_source_at_start": "$default_source_json",
+    "default_sink_at_start": "$default_sink_json",
+    "audio_monitor_enabled": "$HUSHNOTE_AUDIO_MONITOR",
+    "audio_monitor_status_file": "$monitor_status_json",
+    "capture_diagnostics_file": "$diagnostics_json",
+    "recording_exit_code": $ffmpeg_exit_code
+  }
+}
+EOF
+}
 
 notify_audio_warning() {
     local title="$1"
@@ -144,11 +241,13 @@ monitor_audio_source() {
         if is_silent_level "$level"; then
             silent_count=$((silent_count + 1))
         else
+            printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$label" "$source" "verified" "$level" >> "$AUDIO_MONITOR_STATUS_FILE"
             echo "Audio monitor verified $label (${level} dB max); stopping monitor" >&2
             return 0
         fi
 
         if [ "$silent_count" -ge "$HUSHNOTE_AUDIO_MONITOR_WARN_AFTER" ] && [ "$warned" = false ]; then
+            printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$label" "$source" "warning" "$level" >> "$AUDIO_MONITOR_STATUS_FILE"
             notify_audio_warning \
                 "HushNote audio warning" \
                 "$label has not produced audio yet (${level} dB max). Check meeting audio capture."
@@ -214,6 +313,8 @@ start_audio_monitor() {
 
 # Determine audio source.
 # AUDIO_SOURCE env var overrides everything.
+DEFAULT_SOURCE_AT_START="$(pactl get-default-source)"
+DEFAULT_SINK_AT_START="$(pactl get-default-sink)"
 # AUDIO_SOURCE_TYPE controls what to capture:
 #   "microphone" (default) - default PulseAudio/PipeWire source (mic)
 #   "monitor"              - monitor of default sink (captures output audio,
@@ -256,14 +357,15 @@ ffmpeg_exit_code=0
 
 if [ "${AUDIO_SOURCE_TYPE:-microphone}" = "both" ]; then
     # Mix microphone and sink monitor into a single recording.
-    MIC_SOURCE="$(pactl get-default-source)"
-    MONITOR_SOURCE="$(pactl get-default-sink).monitor"
+    MIC_SOURCE="$DEFAULT_SOURCE_AT_START"
+    MONITOR_SOURCE="${DEFAULT_SINK_AT_START}.monitor"
     echo "Mixing mic ($MIC_SOURCE) + monitor ($MONITOR_SOURCE)" >&2
     start_audio_monitor "microphone" "$MIC_SOURCE"
     start_audio_monitor "meeting output" "$MONITOR_SOURCE"
 
     if [ "$RECORD_BACKEND" = "pw-record" ]; then
         MIX_SINK="hushnote_mix_${TIMESTAMP}"
+        MIX_MONITOR_SOURCE="${MIX_SINK}.monitor"
         NULL_MODULE=$(pactl load-module module-null-sink sink_name="$MIX_SINK" sink_properties="device.description=HushNote Mix")
         LOADED_AUDIO_MODULES+=("$NULL_MODULE")
         MIC_LOOP_MODULE=$(pactl load-module module-loopback source="$MIC_SOURCE" sink="$MIX_SINK" latency_msec=20)
@@ -272,7 +374,8 @@ if [ "${AUDIO_SOURCE_TYPE:-microphone}" = "both" ]; then
         LOADED_AUDIO_MODULES+=("$MONITOR_LOOP_MODULE")
         sleep 0.5
 
-        PW_ARGS=(--target "${MIX_SINK}.monitor" --rate 16000 --channels 1 --format s16)
+        PW_ARGS=(--target "$MIX_MONITOR_SOURCE" --rate 16000 --channels 1 --format s16)
+        write_capture_diagnostics "before recording"
         run_recording_command "$DURATION" pw-record "${PW_ARGS[@]}" "$OUTPUT_FILE" >&2
         ffmpeg_exit_code=$?
     else
@@ -285,6 +388,7 @@ if [ "${AUDIO_SOURCE_TYPE:-microphone}" = "both" ]; then
         [ -n "$DURATION" ] && FFMPEG_ARGS+=(-t "$DURATION")
         FFMPEG_ARGS+=("$OUTPUT_FILE")
 
+        write_capture_diagnostics "before recording"
         ffmpeg "${FFMPEG_ARGS[@]}" >&2
         ffmpeg_exit_code=$?
     fi
@@ -292,6 +396,7 @@ if [ "${AUDIO_SOURCE_TYPE:-microphone}" = "both" ]; then
 elif [ "$RECORD_BACKEND" = "pw-record" ]; then
     start_audio_monitor "audio source" "$RECORD_SOURCE"
     PW_ARGS=(--target "$RECORD_SOURCE" --rate 16000 --channels 1 --format s16)
+    write_capture_diagnostics "before recording"
     run_recording_command "$DURATION" pw-record "${PW_ARGS[@]}" "$OUTPUT_FILE" >&2
     ffmpeg_exit_code=$?
 
@@ -301,6 +406,7 @@ else
     [ -n "$DURATION" ] && FFMPEG_ARGS+=(-t "$DURATION")
     FFMPEG_ARGS+=(-ar 16000 -ac 1 -c:a pcm_s16le "$OUTPUT_FILE")
 
+    write_capture_diagnostics "before recording"
     ffmpeg "${FFMPEG_ARGS[@]}" >&2
     ffmpeg_exit_code=$?
 fi
@@ -317,17 +423,9 @@ if [ -f "$OUTPUT_FILE" ]; then
     base_name=$(basename "$OUTPUT_FILE" .wav)
     metadata_file="${meeting_dir}/${base_name}_metadata.json"
 
-    # Generate metadata JSON
-    cat > "$metadata_file" << EOF
-{
-  "title": "${TITLE}",
-  "timestamp": "${TIMESTAMP}",
-  "date": "${DATE}",
-  "audio_file": "$(basename "$OUTPUT_FILE")",
-  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "source": "local_recording"
-}
-EOF
+    # Generate metadata and capture diagnostics.
+    write_capture_diagnostics "after recording"
+    write_metadata "$metadata_file" "$(basename "$OUTPUT_FILE")"
 
     if [ -n "$TITLE" ]; then
         echo "Title: $TITLE" >&2
