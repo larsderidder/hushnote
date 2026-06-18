@@ -31,9 +31,14 @@
 # Audio source type: mic, sink, or both
 #   mic   — microphone input only
 #   sink  — system audio (sink monitor) only, captures what plays through speakers
-#   both  — mix mic and sink monitor (useful for recording calls)
+#   both  — mix the selected microphone plus output sink monitors
 # Default: mic
 #AUDIO_SOURCE_TYPE=mic
+
+# When AUDIO_SOURCE_TYPE=both, capture all output sink monitors.
+# This does not capture all input microphones, only the selected/default mic.
+# Default: true
+#HUSHNOTE_CAPTURE_ALL_SINKS=true
 
 # Unload Ollama models before transcription to free VRAM for Whisper.
 # Set to 1 if you run into out-of-memory errors during transcription.

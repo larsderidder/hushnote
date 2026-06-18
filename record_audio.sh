@@ -29,6 +29,7 @@ DEFAULT_SOURCE_AT_START=""
 DEFAULT_SINK_AT_START=""
 MIC_SOURCE=""
 MONITOR_SOURCE=""
+MONITOR_SOURCES=()
 MIX_SINK=""
 MIX_MONITOR_SOURCE=""
 LOADED_AUDIO_MODULES=()
@@ -39,6 +40,7 @@ HUSHNOTE_AUDIO_MONITOR_INTERVAL="${HUSHNOTE_AUDIO_MONITOR_INTERVAL:-30}"
 HUSHNOTE_AUDIO_MONITOR_SAMPLE="${HUSHNOTE_AUDIO_MONITOR_SAMPLE:-3}"
 HUSHNOTE_AUDIO_MONITOR_WARN_AFTER="${HUSHNOTE_AUDIO_MONITOR_WARN_AFTER:-2}"
 HUSHNOTE_AUDIO_SILENCE_MAX_DB="${HUSHNOTE_AUDIO_SILENCE_MAX_DB:--60}"
+HUSHNOTE_CAPTURE_ALL_SINKS="${HUSHNOTE_CAPTURE_ALL_SINKS:-true}"
 
 cleanup_audio_modules() {
     local pid module
@@ -94,6 +96,34 @@ CAPTURE_DIAGNOSTICS_FILE="$(dirname "$OUTPUT_FILE")/${BASE_NAME}_capture_diagnos
 printf 'timestamp\tlabel\tsource\tstatus\tmax_volume_db\n' > "$AUDIO_MONITOR_STATUS_FILE"
 : > "$CAPTURE_DIAGNOSTICS_FILE"
 
+join_by() {
+    local delimiter="$1"
+    shift
+    local first=true
+    local item
+    for item in "$@"; do
+        if [ "$first" = true ]; then
+            printf '%s' "$item"
+            first=false
+        else
+            printf '%s%s' "$delimiter" "$item"
+        fi
+    done
+}
+
+collect_monitor_sources() {
+    if [ "${HUSHNOTE_CAPTURE_ALL_SINKS,,}" = "true" ] || [ "${HUSHNOTE_CAPTURE_ALL_SINKS,,}" = "yes" ] || [ "${HUSHNOTE_CAPTURE_ALL_SINKS}" = "1" ]; then
+        mapfile -t MONITOR_SOURCES < <(pactl list sources short | awk '$2 ~ /\.monitor$/ && $2 !~ /^hushnote_mix_/ { print $2 }')
+    else
+        MONITOR_SOURCES=("$MONITOR_SOURCE")
+    fi
+
+    if [ "${#MONITOR_SOURCES[@]}" -eq 0 ]; then
+        MONITOR_SOURCES=("$MONITOR_SOURCE")
+    fi
+    MONITOR_SOURCE="$(join_by "," "${MONITOR_SOURCES[@]}")"
+}
+
 json_escape() {
     local value="$1"
     value=${value//\\/\\\\}
@@ -114,6 +144,7 @@ write_capture_diagnostics() {
         echo "record_source=$RECORD_SOURCE"
         echo "mic_source=$MIC_SOURCE"
         echo "monitor_source=$MONITOR_SOURCE"
+        echo "capture_all_sinks=$HUSHNOTE_CAPTURE_ALL_SINKS"
         echo "mix_sink=$MIX_SINK"
         echo "mix_monitor_source=$MIX_MONITOR_SOURCE"
         echo "default_source_at_start=$DEFAULT_SOURCE_AT_START"
@@ -135,7 +166,7 @@ write_metadata() {
     local metadata_file="$1"
     local audio_file_name="$2"
     local title_json record_source_json mic_source_json monitor_source_json mix_sink_json mix_monitor_json
-    local default_source_json default_sink_json monitor_status_json diagnostics_json backend_json source_type_json
+    local default_source_json default_sink_json monitor_status_json diagnostics_json backend_json source_type_json capture_all_json
 
     title_json=$(json_escape "$TITLE")
     backend_json=$(json_escape "$RECORD_BACKEND")
@@ -143,6 +174,7 @@ write_metadata() {
     record_source_json=$(json_escape "$RECORD_SOURCE")
     mic_source_json=$(json_escape "$MIC_SOURCE")
     monitor_source_json=$(json_escape "$MONITOR_SOURCE")
+    capture_all_json=$(json_escape "$HUSHNOTE_CAPTURE_ALL_SINKS")
     mix_sink_json=$(json_escape "$MIX_SINK")
     mix_monitor_json=$(json_escape "$MIX_MONITOR_SOURCE")
     default_source_json=$(json_escape "$DEFAULT_SOURCE_AT_START")
@@ -164,6 +196,7 @@ write_metadata() {
     "record_source": "$record_source_json",
     "mic_source": "$mic_source_json",
     "monitor_source": "$monitor_source_json",
+    "capture_all_sinks": "$capture_all_json",
     "mix_sink": "$mix_sink_json",
     "mix_monitor_source": "$mix_monitor_json",
     "default_source_at_start": "$default_source_json",
@@ -356,12 +389,14 @@ set +e
 ffmpeg_exit_code=0
 
 if [ "${AUDIO_SOURCE_TYPE:-microphone}" = "both" ]; then
-    # Mix microphone and sink monitor into a single recording.
+    # Mix microphone and sink monitor output into a single recording.
+    # By default all sink monitors are captured, because meeting apps can route
+    # audio to a non-default sink when headsets or browser devices change.
     MIC_SOURCE="$DEFAULT_SOURCE_AT_START"
     MONITOR_SOURCE="${DEFAULT_SINK_AT_START}.monitor"
-    echo "Mixing mic ($MIC_SOURCE) + monitor ($MONITOR_SOURCE)" >&2
+    collect_monitor_sources
+    echo "Mixing mic ($MIC_SOURCE) + monitors ($MONITOR_SOURCE)" >&2
     start_audio_monitor "microphone" "$MIC_SOURCE"
-    start_audio_monitor "meeting output" "$MONITOR_SOURCE"
 
     if [ "$RECORD_BACKEND" = "pw-record" ]; then
         MIX_SINK="hushnote_mix_${TIMESTAMP}"
@@ -370,8 +405,10 @@ if [ "${AUDIO_SOURCE_TYPE:-microphone}" = "both" ]; then
         LOADED_AUDIO_MODULES+=("$NULL_MODULE")
         MIC_LOOP_MODULE=$(pactl load-module module-loopback source="$MIC_SOURCE" sink="$MIX_SINK" latency_msec=20)
         LOADED_AUDIO_MODULES+=("$MIC_LOOP_MODULE")
-        MONITOR_LOOP_MODULE=$(pactl load-module module-loopback source="$MONITOR_SOURCE" sink="$MIX_SINK" latency_msec=20)
-        LOADED_AUDIO_MODULES+=("$MONITOR_LOOP_MODULE")
+        for source in "${MONITOR_SOURCES[@]}"; do
+            MONITOR_LOOP_MODULE=$(pactl load-module module-loopback source="$source" sink="$MIX_SINK" latency_msec=20)
+            LOADED_AUDIO_MODULES+=("$MONITOR_LOOP_MODULE")
+        done
         sleep 0.5
 
         PW_ARGS=(--target "$MIX_MONITOR_SOURCE" --rate 16000 --channels 1 --format s16)
@@ -379,10 +416,12 @@ if [ "${AUDIO_SOURCE_TYPE:-microphone}" = "both" ]; then
         run_recording_command "$DURATION" pw-record "${PW_ARGS[@]}" "$OUTPUT_FILE" >&2
         ffmpeg_exit_code=$?
     else
-        FFMPEG_ARGS=(
-            -f pulse -i "$MIC_SOURCE"
-            -f pulse -i "$MONITOR_SOURCE"
-            -filter_complex amix=inputs=2:duration=longest:normalize=0
+        FFMPEG_ARGS=(-f pulse -i "$MIC_SOURCE")
+        for source in "${MONITOR_SOURCES[@]}"; do
+            FFMPEG_ARGS+=(-f pulse -i "$source")
+        done
+        FFMPEG_ARGS+=(
+            -filter_complex "amix=inputs=$((1 + ${#MONITOR_SOURCES[@]})):duration=longest:normalize=0"
             -ar 16000 -ac 1 -c:a pcm_s16le
         )
         [ -n "$DURATION" ] && FFMPEG_ARGS+=(-t "$DURATION")
