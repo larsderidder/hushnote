@@ -35,10 +35,14 @@
 # Default: mic
 #AUDIO_SOURCE_TYPE=mic
 
-# When AUDIO_SOURCE_TYPE=both, capture all output sink monitors.
+# When AUDIO_SOURCE_TYPE=both, choose which output sinks to capture.
 # This does not capture all input microphones, only the selected/default mic.
-# Default: true
-#HUSHNOTE_CAPTURE_ALL_SINKS=true
+# Values:
+#   all                         capture every output sink monitor
+#   default                     capture only the default output sink monitor
+#   sink1,sink2.monitor         capture a comma-separated allowlist
+# Default: all
+#HUSHNOTE_OUTPUT_SINKS=all
 
 # Unload Ollama models before transcription to free VRAM for Whisper.
 # Set to 1 if you run into out-of-memory errors during transcription.

@@ -40,7 +40,7 @@ HUSHNOTE_AUDIO_MONITOR_INTERVAL="${HUSHNOTE_AUDIO_MONITOR_INTERVAL:-30}"
 HUSHNOTE_AUDIO_MONITOR_SAMPLE="${HUSHNOTE_AUDIO_MONITOR_SAMPLE:-3}"
 HUSHNOTE_AUDIO_MONITOR_WARN_AFTER="${HUSHNOTE_AUDIO_MONITOR_WARN_AFTER:-2}"
 HUSHNOTE_AUDIO_SILENCE_MAX_DB="${HUSHNOTE_AUDIO_SILENCE_MAX_DB:--60}"
-HUSHNOTE_CAPTURE_ALL_SINKS="${HUSHNOTE_CAPTURE_ALL_SINKS:-true}"
+HUSHNOTE_OUTPUT_SINKS="${HUSHNOTE_OUTPUT_SINKS:-all}"
 
 cleanup_audio_modules() {
     local pid module
@@ -111,12 +111,33 @@ join_by() {
     done
 }
 
-collect_monitor_sources() {
-    if [ "${HUSHNOTE_CAPTURE_ALL_SINKS,,}" = "true" ] || [ "${HUSHNOTE_CAPTURE_ALL_SINKS,,}" = "yes" ] || [ "${HUSHNOTE_CAPTURE_ALL_SINKS}" = "1" ]; then
-        mapfile -t MONITOR_SOURCES < <(pactl list sources short | awk '$2 ~ /\.monitor$/ && $2 !~ /^hushnote_mix_/ { print $2 }')
+sink_to_monitor_source() {
+    local sink="$1"
+    if [[ "$sink" == *.monitor ]]; then
+        printf '%s' "$sink"
     else
-        MONITOR_SOURCES=("$MONITOR_SOURCE")
+        printf '%s.monitor' "$sink"
     fi
+}
+
+collect_monitor_sources() {
+    local item
+    local output_sinks="${HUSHNOTE_OUTPUT_SINKS,,}"
+
+    case "$output_sinks" in
+        all)
+            mapfile -t MONITOR_SOURCES < <(pactl list sources short | awk '$2 ~ /\.monitor$/ && $2 !~ /^hushnote_mix_/ { print $2 }')
+            ;;
+        default)
+            MONITOR_SOURCES=("$MONITOR_SOURCE")
+            ;;
+        *)
+            IFS=',' read -r -a MONITOR_SOURCES <<< "$HUSHNOTE_OUTPUT_SINKS"
+            for item in "${!MONITOR_SOURCES[@]}"; do
+                MONITOR_SOURCES[$item]="$(sink_to_monitor_source "${MONITOR_SOURCES[$item]//[[:space:]]/}")"
+            done
+            ;;
+    esac
 
     if [ "${#MONITOR_SOURCES[@]}" -eq 0 ]; then
         MONITOR_SOURCES=("$MONITOR_SOURCE")
@@ -144,7 +165,7 @@ write_capture_diagnostics() {
         echo "record_source=$RECORD_SOURCE"
         echo "mic_source=$MIC_SOURCE"
         echo "monitor_source=$MONITOR_SOURCE"
-        echo "capture_all_sinks=$HUSHNOTE_CAPTURE_ALL_SINKS"
+        echo "output_sinks=$HUSHNOTE_OUTPUT_SINKS"
         echo "mix_sink=$MIX_SINK"
         echo "mix_monitor_source=$MIX_MONITOR_SOURCE"
         echo "default_source_at_start=$DEFAULT_SOURCE_AT_START"
@@ -166,7 +187,7 @@ write_metadata() {
     local metadata_file="$1"
     local audio_file_name="$2"
     local title_json record_source_json mic_source_json monitor_source_json mix_sink_json mix_monitor_json
-    local default_source_json default_sink_json monitor_status_json diagnostics_json backend_json source_type_json capture_all_json
+    local default_source_json default_sink_json monitor_status_json diagnostics_json backend_json source_type_json output_sinks_json
 
     title_json=$(json_escape "$TITLE")
     backend_json=$(json_escape "$RECORD_BACKEND")
@@ -174,7 +195,7 @@ write_metadata() {
     record_source_json=$(json_escape "$RECORD_SOURCE")
     mic_source_json=$(json_escape "$MIC_SOURCE")
     monitor_source_json=$(json_escape "$MONITOR_SOURCE")
-    capture_all_json=$(json_escape "$HUSHNOTE_CAPTURE_ALL_SINKS")
+    output_sinks_json=$(json_escape "$HUSHNOTE_OUTPUT_SINKS")
     mix_sink_json=$(json_escape "$MIX_SINK")
     mix_monitor_json=$(json_escape "$MIX_MONITOR_SOURCE")
     default_source_json=$(json_escape "$DEFAULT_SOURCE_AT_START")
@@ -196,7 +217,7 @@ write_metadata() {
     "record_source": "$record_source_json",
     "mic_source": "$mic_source_json",
     "monitor_source": "$monitor_source_json",
-    "capture_all_sinks": "$capture_all_json",
+    "output_sinks": "$output_sinks_json",
     "mix_sink": "$mix_sink_json",
     "mix_monitor_source": "$mix_monitor_json",
     "default_source_at_start": "$default_source_json",
