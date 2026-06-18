@@ -418,6 +418,9 @@ if [ "${AUDIO_SOURCE_TYPE:-microphone}" = "both" ]; then
     collect_monitor_sources
     echo "Mixing mic ($MIC_SOURCE) + monitors ($MONITOR_SOURCE)" >&2
     start_audio_monitor "microphone" "$MIC_SOURCE"
+    for source in "${MONITOR_SOURCES[@]}"; do
+        start_audio_monitor "meeting output" "$source"
+    done
 
     if [ "$RECORD_BACKEND" = "pw-record" ]; then
         MIX_SINK="hushnote_mix_${TIMESTAMP}"
