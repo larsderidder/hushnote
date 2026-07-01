@@ -7,6 +7,7 @@ Takes transcription text and generates meeting notes, summaries, and action item
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ except ImportError:
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_NUM_CTX = 32768
+DEFAULT_OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "900"))
 MAX_DIRECT_TRANSCRIPT_CHARS = 24000
 CHUNK_TRANSCRIPT_CHARS = 18000
 
@@ -93,6 +95,7 @@ def query_ollama(
     model: str = "llama3.1:8b",
     ollama_url: str = DEFAULT_OLLAMA_URL,
     num_ctx: int = DEFAULT_NUM_CTX,
+    timeout: int = DEFAULT_OLLAMA_TIMEOUT,
 ) -> str:
     """
     Query Ollama API for text generation
@@ -122,7 +125,7 @@ def query_ollama(
                     "temperature": 0.2,
                 },
             },
-            timeout=300,  # 5 minute timeout
+            timeout=timeout,
         )
         response.raise_for_status()
         return response.json()["response"]
@@ -150,29 +153,34 @@ def summarize_meeting(
     transcription: str,
     model: str,
     ollama_url: str,
+    timeout: int = DEFAULT_OLLAMA_TIMEOUT,
 ) -> dict:
     """Generate meeting notes from a transcription."""
     print(f"Generating meeting summary using {model}...", file=sys.stderr)
 
     if len(transcription) > MAX_DIRECT_TRANSCRIPT_CHARS:
         print("Transcript is long; summarizing in chunks first...", file=sys.stderr)
-        chunk_summaries = _summarize_chunks(transcription, model, ollama_url)
+        chunk_summaries = _summarize_chunks(transcription, model, ollama_url, timeout)
         text = query_ollama(
             FINAL_PROMPT.format(chunk_summaries="\n\n".join(chunk_summaries)),
             model=model,
             ollama_url=ollama_url,
+            timeout=timeout,
         )
     else:
         text = query_ollama(
             SUMMARY_PROMPT.format(transcription=transcription),
             model=model,
             ollama_url=ollama_url,
+            timeout=timeout,
         )
 
     return {"summary": _strip_code_fence(text)}
 
 
-def _summarize_chunks(transcription: str, model: str, ollama_url: str) -> list[str]:
+def _summarize_chunks(
+    transcription: str, model: str, ollama_url: str, timeout: int
+) -> list[str]:
     """Summarize transcript chunks before the final summary pass."""
     chunks = _split_transcript(transcription, CHUNK_TRANSCRIPT_CHARS)
     summaries = []
@@ -184,6 +192,7 @@ def _summarize_chunks(transcription: str, model: str, ollama_url: str) -> list[s
             ),
             model=model,
             ollama_url=ollama_url,
+            timeout=timeout,
         )
         summaries.append(f"### Deel {index}\n{_strip_code_fence(summary)}")
     return summaries
@@ -274,6 +283,12 @@ def main():
     parser.add_argument(
         "-o", "--output", help="Output file (default: transcription_file_summary.md)"
     )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_OLLAMA_TIMEOUT,
+        help=f"Ollama request timeout in seconds (default: {DEFAULT_OLLAMA_TIMEOUT})",
+    )
 
     args = parser.parse_args()
 
@@ -298,6 +313,7 @@ def main():
             transcription,
             model=args.model,
             ollama_url=args.ollama_url,
+            timeout=args.timeout,
         )
 
         # Save results
